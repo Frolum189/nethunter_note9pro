@@ -1,0 +1,87 @@
+name: Build NetHunter Kernel
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # Позволяет запускать вручную
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 1
+    
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison flex libssl-dev make \
+          gcc clang gcc-aarch64-linux-gnu \
+          libelf-dev device-tree-compiler \
+          zip git-core gnupg build-essential \
+          curl zlib1g-dev
+    
+    - name: Download toolchains
+      run: |
+        cd $GITHUB_WORKSPACE
+        mkdir -p toolchains
+        cd toolchains
+        
+        # GCC toolchain
+        git clone --depth=1 https://bitbucket.org/UBERTC/aarch64-linux-android-4.9.git gcc-aarch64
+        
+        echo "Toolchains ready"
+    
+    - name: Build kernel
+      run: |
+        export PATH=$GITHUB_WORKSPACE/toolchains/gcc-aarch64/bin:$PATH
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-android-
+        
+        # Disable problematic options
+        make O=out custj_defconfig
+        
+        scripts/config --file out/.config \
+          --disable CONFIG_CC_STACKPROTECTOR_STRONG \
+          --disable CONFIG_STACKPROTECTOR_STRONG
+        
+        make O=out olddefconfig
+        
+        # Build
+        make -j$(nproc) O=out \
+          ARCH=arm64 \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-android-
+    
+    - name: Prepare artifacts
+      if: success()
+      run: |
+        mkdir -p upload
+        cp out/arch/arm64/boot/Image.gz upload/ 2>/dev/null || cp out/arch/arm64/boot/Image upload/
+        cp out/arch/arm64/boot/dtbo.img upload/ 2>/dev/null || true
+        find out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} upload/ \; 2>/dev/null || true
+        
+        # Create info file
+        echo "Build Date: $(date)" > upload/build-info.txt
+        echo "Kernel Version: $(cat out/include/config/kernel.release 2>/dev/null || echo 'unknown')" >> upload/build-info.txt
+    
+    - name: Upload kernel artifacts
+      if: success()
+      uses: actions/upload-artifact@v3
+      with:
+        name: nethunter-kernel-joyeuse
+        path: upload/*
+    
+    - name: Create Release (on tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: upload/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
